@@ -1,84 +1,153 @@
-/*
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	authv1alpha1 "github.com/winklermichael/otto/api/v1alpha1"
 )
 
 var _ = Describe("OAuthTokenConfig Controller", func() {
 	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+		const (
+			resourceName      = "test-resource"
+			namespace         = "default"
+			credentialsSecret = "test-credentials-secret"
+			targetSecret      = "test-target-secret"
+			clientIDField     = "client_id"
+			clientSecretField = "client_secret"
+			usernameField     = "username"
+			passwordField     = "password"
+			refreshTokenField = "refresh_token"
+			tokenField        = "access_token"
+			refreshURL        = "https://example.com/oauth/token"
+		)
 
 		ctx := context.Background()
-
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: namespace,
 		}
-		oauthtokenconfig := &authv1alpha1.OAuthTokenConfig{}
+
+		var mockServer *httptest.Server
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind OAuthTokenConfig")
-			err := k8sClient.Get(ctx, typeNamespacedName, oauthtokenconfig)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &authv1alpha1.OAuthTokenConfig{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			// Create a mock HTTP server
+			mockServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				Expect(r.Method).To(Equal("POST"))
+				Expect(r.URL.Path).To(Equal("/oauth/token"))
+
+				// Simulate a successful token response
+				w.WriteHeader(http.StatusOK)
+				_, err := w.Write([]byte(`{
+					"access_token": "mock-access-token",
+					"refresh_token": "mock-refresh-token",
+					"expires_in": 3600
+				}`))
+				Expect(err).NotTo(HaveOccurred()) // Check the error from w.Write
+			}))
+
+			// Create the credentials secret
+			credentials := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      credentialsSecret,
+					Namespace: namespace,
+				},
+				Data: map[string][]byte{
+					clientIDField:     []byte("test-client-id"),
+					clientSecretField: []byte("test-client-secret"),
+					usernameField:     []byte("test-username"),
+					passwordField:     []byte("test-password"),
+				},
 			}
+			Expect(k8sClient.Create(ctx, credentials)).To(Succeed())
+
+			// Create the OAuthTokenConfig resource
+			oauthTokenConfig := &authv1alpha1.OAuthTokenConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: namespace,
+				},
+				Spec: authv1alpha1.OAuthTokenConfigSpec{
+					RefreshURL:              mockServer.URL + "/oauth/token", // Use the mock server URL
+					CredentialsSecretRef:    corev1.SecretReference{Name: credentialsSecret, Namespace: namespace},
+					TargetSecretRef:         corev1.SecretReference{Name: targetSecret, Namespace: namespace},
+					Type:                    "ropc",
+					TokenFieldName:          tokenField,
+					RefreshTokenFieldName:   refreshTokenField,
+					ClientIDFieldName:       clientIDField,
+					ClientSecretFieldName:   clientSecretField,
+					UsernameFieldName:       usernameField,
+					PasswordFieldName:       passwordField,
+					RefreshBufferPercentage: 10,
+				},
+			}
+			Expect(k8sClient.Create(ctx, oauthTokenConfig)).To(Succeed())
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &authv1alpha1.OAuthTokenConfig{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+			// Stop the mock server
+			mockServer.Close()
 
-			By("Cleanup the specific resource instance OAuthTokenConfig")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			// Cleanup the OAuthTokenConfig resource
+			oauthTokenConfig := &authv1alpha1.OAuthTokenConfig{}
+			err := k8sClient.Get(ctx, typeNamespacedName, oauthTokenConfig)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, oauthTokenConfig)).To(Succeed())
+			}
+
+			// Cleanup the credentials secret
+			credentials := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: credentialsSecret, Namespace: namespace}, credentials)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, credentials)).To(Succeed())
+			}
+
+			// Cleanup the target secret
+			target := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: targetSecret, Namespace: namespace}, target)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, target)).To(Succeed())
+			}
 		})
+
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &OAuthTokenConfigReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:        k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				EventRecorder: record.NewFakeRecorder(10), // Initialize the EventRecorder
+				HTTPClient:    mockServer.Client(),        // Use the mock HTTP client
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			// Verify that the target secret was created
+			target := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: targetSecret, Namespace: namespace}, target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(target.Data).To(HaveKey(tokenField))
+			Expect(target.Data).To(HaveKey(refreshTokenField))
+
+			// Verify that the status of the OAuthTokenConfig resource was updated
+			oauthTokenConfig := &authv1alpha1.OAuthTokenConfig{}
+			err = k8sClient.Get(ctx, typeNamespacedName, oauthTokenConfig)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(oauthTokenConfig.Status.Status).To(Equal("Refreshing"))
+			Expect(oauthTokenConfig.Status.LastRefreshed.Time).To(BeTemporally("~", time.Now(), time.Minute))
 		})
 	})
 })

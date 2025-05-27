@@ -26,6 +26,7 @@ type OAuthTokenConfigReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	EventRecorder record.EventRecorder
+	HTTPClient    *http.Client
 }
 
 // +kubebuilder:rbac:groups=auth.example.com,resources=oauthtokenconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -97,7 +98,7 @@ func (r *OAuthTokenConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 		if now.Before(refreshExpiration) {
 			log.Info("Refresh token is valid, using it to refresh access token")
-			tokens, err = refreshAccessToken(clientID, clientSecret, refreshToken, oauthTokenConfig.Spec.RefreshURL)
+			tokens, err = refreshAccessToken(r.HTTPClient, clientID, clientSecret, refreshToken, oauthTokenConfig.Spec.RefreshURL)
 			if err != nil {
 				log.Error(err, "Failed to refresh token using refresh token, falling back to credentials")
 				r.emitEvent(&oauthTokenConfig, corev1.EventTypeWarning, "TokenRefreshFailed", "Failed to refresh token using refresh token, falling back to credentials")
@@ -160,7 +161,7 @@ func (r *OAuthTokenConfigReconciler) fetchTokensUsingCredentials(ctx context.Con
 
 	// Fetch tokens using username/password
 	log.Info("Fetching tokens using credentials (username/password)")
-	tokens, err := getInitialTokens(clientID, clientSecret, username, password, tokenURL)
+	tokens, err := getInitialTokens(r.HTTPClient, clientID, clientSecret, username, password, tokenURL)
 	if err != nil {
 		log.Error(err, "Failed to fetch tokens using credentials")
 		r.emitEvent(oauthTokenConfig, corev1.EventTypeWarning, "TokenFetchFailed", "Failed to fetch tokens using credentials")
@@ -244,7 +245,7 @@ func (r *OAuthTokenConfigReconciler) createOrUpdateSecret(ctx context.Context, s
 }
 
 // getInitialTokens fetches the initial access and refresh tokens using ROPC
-func getInitialTokens(clientID, clientSecret, username, password, tokenURL string) (*Tokens, error) {
+func getInitialTokens(client *http.Client, clientID, clientSecret, username, password, tokenURL string) (*Tokens, error) {
 	data := url.Values{}
 	data.Set("grant_type", "password")
 	data.Set("client_id", clientID)
@@ -258,12 +259,16 @@ func getInitialTokens(clientID, clientSecret, username, password, tokenURL strin
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make HTTP request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log := log.FromContext(context.Background()) // Use the controller-runtime logger
+			log.Error(err, "Error closing response body")
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)
@@ -279,7 +284,7 @@ func getInitialTokens(clientID, clientSecret, username, password, tokenURL strin
 }
 
 // refreshAccessToken refreshes the access token using the refresh token
-func refreshAccessToken(clientID, clientSecret, refreshToken, tokenURL string) (*Tokens, error) {
+func refreshAccessToken(client *http.Client, clientID, clientSecret, refreshToken, tokenURL string) (*Tokens, error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("client_id", clientID)
@@ -292,12 +297,16 @@ func refreshAccessToken(clientID, clientSecret, refreshToken, tokenURL string) (
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make HTTP request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log := log.FromContext(context.Background())
+			log.Error(err, "Error closing response body")
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)
@@ -323,6 +332,14 @@ type Tokens struct {
 // SetupWithManager sets up the controller with the Manager.
 func (r *OAuthTokenConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.EventRecorder = mgr.GetEventRecorderFor("OAuthTokenConfigController")
+
+	// Initialize HTTPClient if it is nil
+	if r.HTTPClient == nil {
+		r.HTTPClient = &http.Client{
+			Timeout: 10 * time.Second, // Set a reasonable timeout
+		}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&authv1alpha1.OAuthTokenConfig{}).
 		Complete(r)
