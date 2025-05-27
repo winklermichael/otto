@@ -1,0 +1,19 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "otto.fullname" . }}-oauthtokenconfig-admin-role
+  labels:
+  {{- include "otto.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - auth.example.com
+  resources:
+  - oauthtokenconfigs
+  verbs:
+  - '*'
+- apiGroups:
+  - auth.example.com
+  resources:
+  - oauthtokenconfigs/status
+  verbs:
+  - get
