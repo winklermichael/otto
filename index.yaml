@@ -1,0 +1,15 @@
+apiVersion: v1
+entries:
+  otto:
+  - apiVersion: v2
+    appVersion: 0.1.0
+    created: "2025-05-30T16:17:56.288191655Z"
+    description: A Helm chart to distribute the project otto
+    digest: 35272f6c6edd144099c600c19698b183be8b82b8b4bf77699e309247cf29faa9
+    icon: https://example.com/icon.png
+    name: otto
+    type: application
+    urls:
+    - https://github.com/winklermichael/otto/releases/download/otto-0.1.0/otto-0.1.0.tgz
+    version: 0.1.0
+generated: "2025-05-30T16:17:56.288198198Z"
