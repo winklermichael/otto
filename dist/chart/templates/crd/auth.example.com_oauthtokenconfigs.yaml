@@ -22,8 +22,8 @@ spec:
   versions:
   - additionalPrinterColumns:
     - description: The last time the token was refreshed
-      jsonPath: .status.lastRefreshed
-      name: Last Refreshed
+      jsonPath: .status.lastRefresh
+      name: Last Refresh
       type: string
     - description: The next scheduled refresh time
       jsonPath: .status.nextRefresh
@@ -31,7 +31,11 @@ spec:
       type: string
     - description: The token expiration time
       jsonPath: .status.expirationTime
-      name: Expiration Time
+      name: Token Expiration Time
+      type: string
+    - description: The refresh token expiration time
+      jsonPath: .status.refreshExpirationTime
+      name: Refresh Expiration Time
       type: string
     - description: The current status of the resource
       jsonPath: .status.status
@@ -62,6 +66,14 @@ spec:
           spec:
             description: OAuthTokenConfigSpec defines the desired state of OAuthTokenConfig
             properties:
+              accessTokenFieldName:
+                default: access_token
+                description: 'Optional: the name of the field in the target secret
+                  where the token will be stored'
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
               clientIdFieldName:
                 default: client_id
                 description: |-
@@ -122,12 +134,6 @@ spec:
                 minLength: 1
                 pattern: ^[a-zA-Z0-9_.-]+$
                 type: string
-              refreshUrl:
-                description: URL to refresh the token
-                maxLength: 2048
-                minLength: 1
-                pattern: ^https?://[a-zA-Z0-9_.-]+(:[0-9]+)?(/.*)?$
-                type: string
               targetSecretRef:
                 description: Reference to the secret where the token will be written
                 properties:
@@ -141,19 +147,16 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
-              tokenFieldName:
-                default: access_token
-                description: 'Optional: the name of the field in the target secret
-                  where the token will be stored'
-                maxLength: 64
+              tokenUrl:
+                description: URL to refresh the token
+                maxLength: 2048
                 minLength: 1
-                pattern: ^[a-zA-Z0-9_.-]+$
+                pattern: ^https?://[a-zA-Z0-9_.-]+(:[0-9]+)?(/.*)?$
                 type: string
               type:
-                description: OAuth Grant type, one of "ropc", "todo"
+                description: OAuth Grant type, one of ["ropc"]
                 enum:
                 - ropc
-                - todo
                 type: string
               usernameFieldName:
                 default: username
@@ -166,8 +169,8 @@ spec:
                 type: string
             required:
             - credentialsSecretRef
-            - refreshUrl
             - targetSecretRef
+            - tokenUrl
             - type
             type: object
           status:
@@ -176,13 +179,13 @@ spec:
               expirationTime:
                 format: date-time
                 type: string
-              lastRefreshed:
+              lastRefresh:
                 format: date-time
                 type: string
               nextRefresh:
                 format: date-time
                 type: string
-              refreshExpiration:
+              refreshExpirationTime:
                 format: date-time
                 type: string
               status:

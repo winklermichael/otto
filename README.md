@@ -104,6 +104,18 @@ make envtest
 
 For productive systems it is recommended to use the provided helm-chart. See Chapter Installing for more information.
 
+## Configuration
+
+The operator can be configured using environment variables. The following variables are available:
+- `REQUEUE_TIME`: The time after which the operator will requeue a resource for reconciliation in case of a retry. Default is `30s`.
+- `HTTP_CLIENT_TIMEOUT`: The timeout for HTTP client requests. Default is `10s`.
+
+## Documentation
+For detailed documentation on the OAuth Token Triage Operator, including API specifications, design decisions, and usage examples, please refer to the [docs](docs/) directory.
+
+## Usage
+For an example of how to use the OAuth Token Triage Operator, please refer to the [example](example/) directory. This directory contains sample configurations and usage patterns for integrating OTTO with your applications.
+
 ## Built With
 
 * [Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) - Framework for building Kubernetes APIs using CRDs

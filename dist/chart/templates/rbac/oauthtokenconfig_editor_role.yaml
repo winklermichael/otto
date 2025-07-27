@@ -11,6 +11,9 @@ kind: ClusterRole
 metadata:
   labels:
     {{- include "chart.labels" . | nindent 4 }}
+  labels:
+    app.kubernetes.io/name: otto
+    app.kubernetes.io/managed-by: kustomize
   name: oauthtokenconfig-editor-role
 rules:
 - apiGroups:

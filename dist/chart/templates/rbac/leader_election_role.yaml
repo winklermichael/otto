@@ -6,6 +6,9 @@ metadata:
   labels:
     {{- include "chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: otto
+    app.kubernetes.io/managed-by: kustomize
   name: otto-leader-election-role
 rules:
 - apiGroups:

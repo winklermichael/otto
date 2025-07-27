@@ -1,0 +1,38 @@
+apiVersion: auth.example.com/v1alpha1
+kind: OAuthTokenConfig
+metadata:
+  name: example-oauth-token-config
+  namespace: default
+spec:
+  tokenUrl: https://example.com/oauth/token
+  type: ropc
+  target:
+    secretRef:
+      name: example-target-secret
+      namespace: default
+    accessTokenFieldName: access_token
+    refreshTokenFieldName: refresh_token
+  credentials:
+    secretRef:
+      name: example-credentials-secret
+      namespace: default
+    clientIdFieldName: client_id
+    clientSecretFieldName: client_secret
+    usernameFieldName: username
+    passwordFieldName: password
+  tokenResponse:
+    accessTokenFieldName: access_token
+    refreshTokenFieldName: refresh_token
+    expirationFieldName: expires_in
+    refreshExpirationFieldName: refresh_expires_in
+  tokenRequest:
+    method: POST
+    contentType: application/x-www-form-urlencoded
+    grantTypeFieldName: grant_type
+    clientIdFieldName: client_id
+    clientSecretFieldName: client_secret
+    usernameFieldName: username
+    passwordFieldName: password
+    refreshTokenFieldName: refresh_token
+  refreshInterval: 1h
+  refreshBufferPercentage: 10

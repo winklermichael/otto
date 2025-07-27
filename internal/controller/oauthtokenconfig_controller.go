@@ -2,15 +2,12 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	authv1alpha1 "github.com/winklermichael/otto/api/v1alpha1"
+	definitions "github.com/winklermichael/otto/internal/controller/definitions"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,304 +26,214 @@ type OAuthTokenConfigReconciler struct {
 	HTTPClient    *http.Client
 }
 
+var (
+	REQUEUE_TIME        = getEnvDuration("REQUEUE_TIME", 30*time.Second)
+	HTTP_CLIENT_TIMEOUT = getEnvDuration("HTTP_CLIENT_TIMEOUT", 10*time.Second)
+)
+
 // +kubebuilder:rbac:groups=auth.example.com,resources=oauthtokenconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=auth.example.com,resources=oauthtokenconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=auth.example.com,resources=oauthtokenconfigs/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update;delete
 
+/* MAIN RECONCILER FUNCTION */
+
 // Reconcile is part of the main Kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *OAuthTokenConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Create a logger for the current context
 	log := log.FromContext(ctx)
 
 	// Fetch the OAuthTokenConfig resource
 	var oauthTokenConfig authv1alpha1.OAuthTokenConfig
-	if err := r.Get(ctx, req.NamespacedName, &oauthTokenConfig); err != nil {
-		log.Error(err, "Failed to get OAuthTokenConfig")
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
+	if err := r.fetchResource(ctx, req.NamespacedName, &oauthTokenConfig); err != nil {
+		log.Error(err, "Failed to fetch OAuthTokenConfig", "OAuthTokenConfig", req.NamespacedName, "Error", err)
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceFetchFailed", fmt.Sprintf("Failed to fetch OAuthTokenConfig: %v", err))
 
-	// Check if the current time is after the NextRefresh timestamp
-	now := time.Now()
-	if !oauthTokenConfig.Status.NextRefresh.IsZero() && now.Before(oauthTokenConfig.Status.NextRefresh.Time.Add(-10*time.Second)) {
-		log.Info("Skipping reconciliation as the current time is before the next refresh", "now", now, "nextRefresh", oauthTokenConfig.Status.NextRefresh.Time)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, err
 	}
 
 	// Emit an event indicating the reconciliation has started
-	r.emitEvent(&oauthTokenConfig, corev1.EventTypeNormal, "ReconciliationStarted", "Starting reconciliation")
+	log.Info("Starting reconciliation")
+	r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeNormal, "ReconciliationStarted", "Starting reconciliation")
 
-	// Fetch the target secret to check for existing tokens
-	targetSecret := &corev1.Secret{}
-	targetSecretName := types.NamespacedName{
-		Name:      oauthTokenConfig.Spec.TargetSecretRef.Name,
-		Namespace: oauthTokenConfig.Spec.TargetSecretRef.Namespace,
+	// Check if the current time is after the NextRefresh timestamp
+	currentTime := time.Now()
+	if !oauthTokenConfig.Status.NextRefresh.IsZero() && currentTime.Before(oauthTokenConfig.Status.NextRefresh.Time) {
+		log.Info("Skipping reconciliation", "nextRefresh", oauthTokenConfig.Status.NextRefresh.Time)
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeNormal, "ReconciliationSkipped", fmt.Sprintf("Skipping reconciliation, next refresh: %s", oauthTokenConfig.Status.NextRefresh.Time))
+
+		if time.Until(oauthTokenConfig.Status.NextRefresh.Time) <= 0 {
+			return ctrl.Result{Requeue: true}, nil
+		}
+
+		return ctrl.Result{
+			RequeueAfter: time.Until(oauthTokenConfig.Status.NextRefresh.Time),
+		}, nil
 	}
-	err := r.Get(ctx, targetSecretName, targetSecret)
-	if err != nil && client.IgnoreNotFound(err) != nil {
-		log.Error(err, "Failed to get target secret", "targetSecretName", targetSecretName)
-		r.emitEvent(&oauthTokenConfig, corev1.EventTypeWarning, "TargetSecretNotFound", fmt.Sprintf("Failed to fetch target secret: %s", targetSecretName))
+
+	// Fetch the target secret
+	targetSecretName := types.NamespacedName{
+		Name:      oauthTokenConfig.Spec.Target.SecretRef.Name,
+		Namespace: oauthTokenConfig.Spec.Target.SecretRef.Namespace,
+	}
+	targetSecret := &corev1.Secret{}
+	if err := r.fetchResource(ctx, targetSecretName, targetSecret); client.IgnoreNotFound(err) != nil {
+		log.Error(err, "Failed to fetch TargetSecret", "TargetSecret", targetSecretName, "Error", err)
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceFetchFailed", fmt.Sprintf("Failed to fetch TargetSecret: %v", err))
+
+		// Set CRD status to FAILED
+		oauthTokenConfig.Status.Status = definitions.STATUS_FAILED
+		if updateErr := r.updateStatus(ctx, &oauthTokenConfig); updateErr != nil {
+			log.Error(updateErr, "Failed to update OAuthTokenConfig status", "Error", updateErr)
+			r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig status: %v", updateErr))
+			return ctrl.Result{}, updateErr
+		}
+
 		return ctrl.Result{}, err
 	}
-
-	var tokens *Tokens
 
 	// Fetch the credentials secret
-	credentialsSecret := &corev1.Secret{}
 	credentialsSecretName := types.NamespacedName{
-		Name:      oauthTokenConfig.Spec.CredentialsSecretRef.Name,
-		Namespace: oauthTokenConfig.Spec.CredentialsSecretRef.Namespace,
+		Name:      oauthTokenConfig.Spec.Credentials.SecretRef.Name,
+		Namespace: oauthTokenConfig.Spec.Credentials.SecretRef.Namespace,
 	}
-	if err := r.Get(ctx, credentialsSecretName, credentialsSecret); err != nil {
-		log.Error(err, "Failed to get credentials secret", "credentialsSecretName", credentialsSecretName)
-		r.emitEvent(&oauthTokenConfig, corev1.EventTypeWarning, "CredentialsSecretNotFound", fmt.Sprintf("Failed to fetch credentials secret: %s", credentialsSecretName))
+	credentialsSecret := &corev1.Secret{}
+	if err := r.fetchResource(ctx, credentialsSecretName, credentialsSecret); err != nil {
+		log.Error(err, "Failed to fetch CredentialsSecret", "CredentialsSecret", credentialsSecretName, "Error", err)
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceFetchFailed", fmt.Sprintf("Failed to fetch CredentialsSecret: %v", err))
+
+		// Set CRD status to FAILED
+		oauthTokenConfig.Status.Status = definitions.STATUS_FAILED
+		if updateErr := r.updateStatus(ctx, &oauthTokenConfig); updateErr != nil {
+			log.Error(updateErr, "Failed to update OAuthTokenConfig status", "Error", updateErr)
+			r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig status: %v", updateErr))
+			return ctrl.Result{}, updateErr
+		}
+
 		return ctrl.Result{}, err
 	}
+	// Validate the credentials secret
+	if err := r.validateCredentialsSecret(ctx, oauthTokenConfig, *credentialsSecret); err != nil {
+		log.Error(err, "Credentials secret validation failed", "CredentialsSecret", credentialsSecretName, "Error", err)
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceValidationFailed", fmt.Sprintf("Credentials secret validation failed: %v", err))
 
-	// Extract client ID and client secret from the credentials secret
-	clientID := string(credentialsSecret.Data[oauthTokenConfig.Spec.ClientIDFieldName])
-	clientSecret := string(credentialsSecret.Data[oauthTokenConfig.Spec.ClientSecretFieldName])
-
-	if err == nil {
-		// Target secret exists, check for existing tokens
-		refreshToken := string(targetSecret.Data[oauthTokenConfig.Spec.RefreshTokenFieldName])
-
-		// Check refresh token expiration from the CRD status
-		refreshExpiration := oauthTokenConfig.Status.RefreshExpiration.Time
-		log.Info("Checking refresh token expiration", "refreshExpiration", refreshExpiration, "now", now)
-
-		if now.Before(refreshExpiration) {
-			log.Info("Refresh token is valid, using it to refresh access token")
-			tokens, err = refreshAccessToken(r.HTTPClient, clientID, clientSecret, refreshToken, oauthTokenConfig.Spec.RefreshURL)
-			if err != nil {
-				log.Error(err, "Failed to refresh token using refresh token, falling back to credentials")
-				r.emitEvent(&oauthTokenConfig, corev1.EventTypeWarning, "TokenRefreshFailed", "Failed to refresh token using refresh token, falling back to credentials")
-			} else {
-				log.Info("Successfully refreshed access token using refresh token")
-				r.emitEvent(&oauthTokenConfig, corev1.EventTypeNormal, "TokenRefreshSucceeded", "Successfully refreshed access token using refresh token")
-			}
-		} else {
-			log.Info("Refresh token is expired, using credentials to fetch new tokens")
-			tokens, err = r.fetchTokensUsingCredentials(ctx, &oauthTokenConfig, clientID, clientSecret)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
+		// Set CRD status to FAILED
+		oauthTokenConfig.Status.Status = definitions.STATUS_FAILED
+		if updateErr := r.updateStatus(ctx, &oauthTokenConfig); updateErr != nil {
+			log.Error(updateErr, "Failed to update OAuthTokenConfig status", "Error", updateErr)
+			r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig status: %v", updateErr))
+			return ctrl.Result{}, updateErr
 		}
-	} else {
-		// Target secret does not exist, use username/password to get initial tokens
-		log.Info("Target secret not found, using credentials to fetch initial tokens")
-		tokens, err = r.fetchTokensUsingCredentials(ctx, &oauthTokenConfig, clientID, clientSecret)
-		if err != nil {
+
+		// Requeue the reconciliation after a short delay to retry
+		return ctrl.Result{RequeueAfter: REQUEUE_TIME}, err
+	}
+
+	// Get current timestamp
+	now := metav1.Now()
+
+	// Fetch new tokens
+	tokens, err := r.refreshToken(ctx, oauthTokenConfig, *targetSecret, *credentialsSecret)
+	if err != nil {
+		log.Error(err, "Failed to refresh token", "Error", err)
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "TokenRefreshFailed", fmt.Sprintf("Failed to refresh token: %v", err))
+
+		// Set CRD status to FAILED
+		oauthTokenConfig.Status.Status = definitions.STATUS_FAILED
+		if updateErr := r.updateStatus(ctx, &oauthTokenConfig); updateErr != nil {
+			log.Error(updateErr, "Failed to update OAuthTokenConfig status", "Error", updateErr)
+			r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig status: %v", updateErr))
+			return ctrl.Result{}, updateErr
+		}
+
+		// Requeue the reconciliation after a short delay to retry
+		return ctrl.Result{RequeueAfter: REQUEUE_TIME}, err
+	}
+	log.Info("Tokens refreshed successfully")
+
+	// Update/Create target secret
+	targetSecretExists := targetSecret.Data != nil
+	if !targetSecretExists {
+		targetSecret.Data = make(map[string][]byte)
+		targetSecret.Name = oauthTokenConfig.Spec.Target.SecretRef.Name
+		targetSecret.Namespace = oauthTokenConfig.Spec.Target.SecretRef.Namespace
+	}
+	targetSecret.Data[oauthTokenConfig.Spec.Target.AccessTokenFieldName] = []byte(tokens.AccessToken)
+	targetSecret.Data[oauthTokenConfig.Spec.Target.RefreshTokenFieldName] = []byte(tokens.RefreshToken)
+
+	if !targetSecretExists {
+		if err := r.createResource(ctx, targetSecret); err != nil {
+			log.Error(err, "Failed to create target secret", "TargetSecret", targetSecret.Name, "Error", err)
+			r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceCreationFailed", fmt.Sprintf("Failed to create target secret: %v", err))
+
+			// Set CRD status to FAILED
+			oauthTokenConfig.Status.Status = definitions.STATUS_FAILED
+			if updateErr := r.updateStatus(ctx, &oauthTokenConfig); updateErr != nil {
+				log.Error(updateErr, "Failed to update OAuthTokenConfig status", "Error", updateErr)
+				r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig status: %v", updateErr))
+				return ctrl.Result{}, updateErr
+			}
+
 			return ctrl.Result{}, err
 		}
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeNormal, "ResourceCreated", fmt.Sprintf("Target secret %s created successfully", targetSecret.Name))
+	} else {
+		if err := r.updateResource(ctx, targetSecret); err != nil {
+			log.Error(err, "Failed to update target secret", "TargetSecret", targetSecret.Name, "Error", err)
+			r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update target secret: %v", err))
+
+			// Set CRD status to FAILED
+			oauthTokenConfig.Status.Status = definitions.STATUS_FAILED
+			if updateErr := r.updateStatus(ctx, &oauthTokenConfig); updateErr != nil {
+				log.Error(updateErr, "Failed to update OAuthTokenConfig status", "Error", updateErr)
+				r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig status: %v", updateErr))
+				return ctrl.Result{}, updateErr
+			}
+
+			return ctrl.Result{}, err
+		}
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeNormal, "ResourceUpdated", fmt.Sprintf("Target secret %s updated successfully", targetSecret.Name))
 	}
 
-	// Store the tokens in the target secret
-	if err := r.storeTokensInSecret(ctx, &oauthTokenConfig, tokens); err != nil {
+	// Update CRD
+	oauthTokenConfig.Status.LastRefresh = now
+	oauthTokenConfig.Status.ExpirationTime = metav1.NewTime(now.Add(time.Duration(tokens.ExpiresIn) * time.Second))
+	oauthTokenConfig.Status.NextRefresh = metav1.NewTime(oauthTokenConfig.Status.ExpirationTime.Time.Add(-(time.Duration(float64(tokens.ExpiresIn) * float64(time.Second) * (float64(oauthTokenConfig.Spec.RefreshBufferPercentage) / 100)))))
+	oauthTokenConfig.Status.RefreshExpirationTime = metav1.NewTime(now.Add(time.Duration(tokens.RefreshExpiresIn) * time.Second))
+	oauthTokenConfig.Status.Status = definitions.STATUS_REFRESHED
+
+	if err := r.updateStatus(ctx, &oauthTokenConfig); err != nil {
+		log.Error(err, "Failed to update OAuthTokenConfig", "Error", err)
+		r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig: %v", err))
+
+		// Set CRD status to FAILED
+		oauthTokenConfig.Status.Status = definitions.STATUS_FAILED
+		if updateErr := r.updateStatus(ctx, &oauthTokenConfig); updateErr != nil {
+			log.Error(updateErr, "Failed to update OAuthTokenConfig status", "Error", updateErr)
+			r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeWarning, "ResourceUpdateFailed", fmt.Sprintf("Failed to update OAuthTokenConfig status: %v", updateErr))
+			return ctrl.Result{}, updateErr
+		}
+
 		return ctrl.Result{}, err
 	}
 
-	// Update the CRD status with token metadata
-	if err := r.updateCRDStatus(ctx, &oauthTokenConfig, tokens); err != nil {
-		return ctrl.Result{}, err
+	// Finalize Reconciliation
+	log.Info("Reconciliation completed successfully")
+	r.EventRecorder.Event(&oauthTokenConfig, corev1.EventTypeNormal, "ReconciliationSuccessful", "Reconciliation completed successfully")
+
+	// Refresh the controller after the specified refresh interval if set, else calculate based on token expiration
+	requeueAfter := time.Duration(0)
+	if oauthTokenConfig.Spec.RefreshInterval != nil && oauthTokenConfig.Spec.RefreshInterval.Duration > 0 {
+		requeueAfter = oauthTokenConfig.Spec.RefreshInterval.Duration
+	} else {
+		requeueAfter = time.Until(oauthTokenConfig.Status.NextRefresh.Time)
 	}
 
-	// Determine requeue interval
-	requeueAfter := r.calculateRequeueInterval(&oauthTokenConfig, tokens)
-	log.Info("Requeuing reconciliation", "requeueAfter", requeueAfter)
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
-}
-
-// fetchTokensUsingCredentials fetches tokens using username and password
-func (r *OAuthTokenConfigReconciler) fetchTokensUsingCredentials(ctx context.Context, oauthTokenConfig *authv1alpha1.OAuthTokenConfig, clientID, clientSecret string) (*Tokens, error) {
-	log := log.FromContext(ctx)
-
-	// Fetch the credentials secret
-	credentialsSecret := &corev1.Secret{}
-	secretName := types.NamespacedName{
-		Name:      oauthTokenConfig.Spec.CredentialsSecretRef.Name,
-		Namespace: oauthTokenConfig.Spec.CredentialsSecretRef.Namespace,
-	}
-	if err := r.Get(ctx, secretName, credentialsSecret); err != nil {
-		log.Error(err, "Failed to get credentials secret", "secretName", secretName)
-		r.emitEvent(oauthTokenConfig, corev1.EventTypeWarning, "SecretNotFound", fmt.Sprintf("Failed to fetch credentials secret: %s", secretName))
-		return nil, err
-	}
-
-	// Extract username and password from the credentials secret
-	username := string(credentialsSecret.Data[oauthTokenConfig.Spec.UsernameFieldName])
-	password := string(credentialsSecret.Data[oauthTokenConfig.Spec.PasswordFieldName])
-	tokenURL := oauthTokenConfig.Spec.RefreshURL
-
-	// Fetch tokens using username/password
-	log.Info("Fetching tokens using credentials (username/password)")
-	tokens, err := getInitialTokens(r.HTTPClient, clientID, clientSecret, username, password, tokenURL)
-	if err != nil {
-		log.Error(err, "Failed to fetch tokens using credentials")
-		r.emitEvent(oauthTokenConfig, corev1.EventTypeWarning, "TokenFetchFailed", "Failed to fetch tokens using credentials")
-		oauthTokenConfig.Status.Status = "Failed"
-		if updateErr := r.Status().Update(ctx, oauthTokenConfig); updateErr != nil {
-			log.Error(updateErr, "Failed to update status")
-		}
-		return nil, fmt.Errorf("failed to fetch tokens using credentials: %w", err)
-	}
-
-	log.Info("Successfully fetched tokens using credentials")
-	r.emitEvent(oauthTokenConfig, corev1.EventTypeNormal, "TokenRefreshSucceeded", "Successfully fetched tokens using credentials")
-	return tokens, nil
-}
-
-// storeTokensInSecret stores tokens in the target secret
-func (r *OAuthTokenConfigReconciler) storeTokensInSecret(ctx context.Context, oauthTokenConfig *authv1alpha1.OAuthTokenConfig, tokens *Tokens) error {
-	if tokens == nil {
-		return fmt.Errorf("tokens object is nil, cannot store tokens in secret")
-	}
-
-	targetSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      oauthTokenConfig.Spec.TargetSecretRef.Name,
-			Namespace: oauthTokenConfig.Spec.TargetSecretRef.Namespace,
-		},
-		Data: map[string][]byte{
-			oauthTokenConfig.Spec.TokenFieldName:        []byte(tokens.AccessToken),
-			oauthTokenConfig.Spec.RefreshTokenFieldName: []byte(tokens.RefreshToken),
-		},
-	}
-	return r.createOrUpdateSecret(ctx, targetSecret)
-}
-
-// updateCRDStatus updates the CRD status with token metadata
-func (r *OAuthTokenConfigReconciler) updateCRDStatus(ctx context.Context, oauthTokenConfig *authv1alpha1.OAuthTokenConfig, tokens *Tokens) error {
-	now := metav1.Now()
-	expirationTime := metav1.NewTime(now.Add(time.Duration(tokens.ExpiresIn) * time.Second))
-	buffer := time.Duration(float64(tokens.ExpiresIn) * float64(time.Second) * (float64(oauthTokenConfig.Spec.RefreshBufferPercentage) / 100))
-	nextRefresh := metav1.NewTime(expirationTime.Time.Add(-buffer))
-	refreshExpiration := metav1.NewTime(now.Add(time.Duration(tokens.RefreshExpiresIn) * time.Second))
-
-	oauthTokenConfig.Status.LastRefreshed = now
-	oauthTokenConfig.Status.ExpirationTime = expirationTime
-	oauthTokenConfig.Status.NextRefresh = nextRefresh
-	oauthTokenConfig.Status.RefreshExpiration = refreshExpiration
-	oauthTokenConfig.Status.Status = "Refreshing"
-
-	return r.Status().Update(ctx, oauthTokenConfig)
-}
-
-// calculateRequeueInterval calculates the requeue interval based on token expiration
-func (r *OAuthTokenConfigReconciler) calculateRequeueInterval(oauthTokenConfig *authv1alpha1.OAuthTokenConfig, tokens *Tokens) time.Duration {
-	if oauthTokenConfig.Spec.RefreshInterval != nil {
-		return oauthTokenConfig.Spec.RefreshInterval.Duration
-	}
-	buffer := time.Duration(float64(tokens.ExpiresIn) * float64(time.Second) * (float64(oauthTokenConfig.Spec.RefreshBufferPercentage) / 100))
-	return time.Duration(tokens.ExpiresIn)*time.Second - buffer
-}
-
-// emitEvent is a helper function to emit events
-func (r *OAuthTokenConfigReconciler) emitEvent(obj runtime.Object, eventType, reason, message string) {
-	r.EventRecorder.Event(obj, eventType, reason, message)
-}
-
-// createOrUpdateSecret creates or updates a Kubernetes Secret
-func (r *OAuthTokenConfigReconciler) createOrUpdateSecret(ctx context.Context, secret *corev1.Secret) error {
-	existingSecret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}, existingSecret)
-	if err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			// Secret does not exist, create it
-			return r.Create(ctx, secret)
-		}
-		return err
-	}
-
-	// Secret exists, update it
-	existingSecret.Data = secret.Data
-	return r.Update(ctx, existingSecret)
-}
-
-// getInitialTokens fetches the initial access and refresh tokens using ROPC
-func getInitialTokens(client *http.Client, clientID, clientSecret, username, password, tokenURL string) (*Tokens, error) {
-	data := url.Values{}
-	data.Set("grant_type", "password")
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
-	data.Set("username", username)
-	data.Set("password", password)
-
-	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make HTTP request: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log := log.FromContext(context.Background()) // Use the controller-runtime logger
-			log.Error(err, "Error closing response body")
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("non-200 response: %d, body: %s", resp.StatusCode, string(responseBody))
-	}
-
-	var tokens Tokens
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &tokens, nil
-}
-
-// refreshAccessToken refreshes the access token using the refresh token
-func refreshAccessToken(client *http.Client, clientID, clientSecret, refreshToken, tokenURL string) (*Tokens, error) {
-	data := url.Values{}
-	data.Set("grant_type", "refresh_token")
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
-	data.Set("refresh_token", refreshToken)
-
-	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make HTTP request: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log := log.FromContext(context.Background())
-			log.Error(err, "Error closing response body")
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("non-200 response: %d, body: %s", resp.StatusCode, string(responseBody))
-	}
-
-	var tokens Tokens
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &tokens, nil
-}
-
-// Tokens represents the structure of the OAuth2 token response
-type Tokens struct {
-	AccessToken      string `json:"access_token"`
-	RefreshToken     string `json:"refresh_token"`
-	ExpiresIn        int    `json:"expires_in"`
-	RefreshExpiresIn int    `json:"refresh_expires_in"`
+	return ctrl.Result{
+		RequeueAfter: requeueAfter, // Requeue after the specified refresh interval
+	}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -336,7 +243,7 @@ func (r *OAuthTokenConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Initialize HTTPClient if it is nil
 	if r.HTTPClient == nil {
 		r.HTTPClient = &http.Client{
-			Timeout: 10 * time.Second, // Set a reasonable timeout
+			Timeout: HTTP_CLIENT_TIMEOUT, // Set a reasonable timeout
 		}
 	}
 
