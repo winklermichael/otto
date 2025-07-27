@@ -45,12 +45,4 @@ jobs:
       - name: Update Helm Chart appVersion
         run: |
           APP_VERSION=${GITHUB_REF#refs/tags/}
-          yq e -i ".appVersion = \"${APP_VERSION}\"" charts/otto/Chart.yaml
-
-      - name: Lint Helm Chart
-        run: helm lint charts/otto
-
-      - name: Package Helm Chart
-        run: |
-          helm package charts/otto --destination dist
-          ls dist
+          yq e -i ".appVersion = \"${APP_VERSION}\"" dist/chart/Chart.yaml
