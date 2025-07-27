@@ -1,0 +1,199 @@
+{{- if .Values.crd.enable }}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: oauthtokenconfigs.auth.example.com
+spec:
+  group: auth.example.com
+  names:
+    kind: OAuthTokenConfig
+    listKind: OAuthTokenConfigList
+    plural: oauthtokenconfigs
+    singular: oauthtokenconfig
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: The last time the token was refreshed
+      jsonPath: .status.lastRefresh
+      name: Last Refresh
+      type: string
+    - description: The next scheduled refresh time
+      jsonPath: .status.nextRefresh
+      name: Next Refresh
+      type: string
+    - description: The token expiration time
+      jsonPath: .status.expirationTime
+      name: Token Expiration Time
+      type: string
+    - description: The refresh token expiration time
+      jsonPath: .status.refreshExpirationTime
+      name: Refresh Expiration Time
+      type: string
+    - description: The current status of the resource
+      jsonPath: .status.status
+      name: Status
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OAuthTokenConfig is the Schema for the oauthtokenconfigs API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: OAuthTokenConfigSpec defines the desired state of OAuthTokenConfig
+            properties:
+              accessTokenFieldName:
+                default: access_token
+                description: 'Optional: the name of the field in the target secret
+                  where the token will be stored'
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
+              clientIdFieldName:
+                default: client_id
+                description: |-
+                  Optional: the name of the field in the credentials secret where the client ID is stored
+                  Default: "client_id"
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
+              clientSecretFieldName:
+                default: client_secret
+                description: |-
+                  Optional: the name of the field in the credentials secret where the client secret is stored
+                  Default: "client_secret"
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
+              credentialsSecretRef:
+                description: Reference to the secret containing client credentials
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              passwordFieldName:
+                default: password
+                description: |-
+                  Optional: the name of the field in the credentials secret where the password is stored
+                  Default: "password"
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
+              refreshBufferPercentage:
+                default: 10
+                description: |-
+                  Optional: percentage of token expiration time before refresh
+                  Default: 10%
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
+              refreshInterval:
+                description: 'Optional: time interval between refreshes'
+                type: string
+              refreshTokenFieldName:
+                default: refresh_token
+                description: 'Optional: the name of the field in the target secret
+                  where the refresh token will be stored'
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
+              targetSecretRef:
+                description: Reference to the secret where the token will be written
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              tokenUrl:
+                description: URL to refresh the token
+                maxLength: 2048
+                minLength: 1
+                pattern: ^https?://[a-zA-Z0-9_.-]+(:[0-9]+)?(/.*)?$
+                type: string
+              type:
+                description: OAuth Grant type, one of ["ropc"]
+                enum:
+                - ropc
+                type: string
+              usernameFieldName:
+                default: username
+                description: |-
+                  Optional: the name of the field in the credentials secret where the username is stored
+                  Default: "username"
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
+            required:
+            - credentialsSecretRef
+            - targetSecretRef
+            - tokenUrl
+            - type
+            type: object
+          status:
+            description: OAuthTokenConfigStatus defines the observed state of OAuthTokenConfig
+            properties:
+              expirationTime:
+                format: date-time
+                type: string
+              lastRefresh:
+                format: date-time
+                type: string
+              nextRefresh:
+                format: date-time
+                type: string
+              refreshExpirationTime:
+                format: date-time
+                type: string
+              status:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end -}}
