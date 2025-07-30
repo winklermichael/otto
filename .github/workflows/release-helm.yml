@@ -2,10 +2,8 @@ name: Release Charts
 
 on:
   push:
-    branches:
-      - main
     tags:
-      - 'chart-*.*.*'  # Match tags like chart-v1.2.3
+      - 'chart-v*.*.*'  # Match tags like chart-v1.2.3
 
 jobs:
   release:
@@ -20,6 +18,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ensure tag is on main branch
+        run: |
+          # Fetch the main branch to check if the tag is on it
+          git fetch origin main
+          # Check if the tag commit is part of the main branch
+          if ! git merge-base --is-ancestor $GITHUB_SHA origin/main; then
+            echo "Tag is not on the main branch. Exiting."
+            exit 1
+          fi
+
       - name: Change app version in Chart.yaml to latest tag
         run: |
           # Get the latest tag with semver format
@@ -28,17 +36,17 @@ jobs:
           # Extract the version number from the tag
           version=${latest_tag#v}
           # Update the Chart.yaml file with the new version
-          sed -i "s/^version: .*/version: $version/" dist/chart/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: $version/" dist/chart/Chart.yaml
       
       - name: Change chart version in Chart.yaml to latest tag
         run: |
           # Get the latest tag with semver format
           # This assumes tags are in the format chart-vX.Y.Z
-          latest_tag=$(git tag --sort=-v:refname | grep -E '^chart-[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          latest_tag=$(git tag --sort=-v:refname | grep -E '^chart-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
           # Extract the version number from the tag
           version=${latest_tag#chart-v}
           # Update the Chart.yaml file with the new version
-          sed -i "s/^appVersion: .*/appVersion: $version/" dist/chart/Chart.yaml
+          sed -i "s/^version: .*/version: $version/" dist/chart/Chart.yaml
 
       - name: Replace image tag in values.yaml with "latest"
         run: |
