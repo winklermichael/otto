@@ -10,7 +10,7 @@ Versioning is handled independently for the application and the Helm chart to al
 ### Application Version (`vMAJOR.MINOR.PATCH`)
 - Tracked via Git **tags**: `v0.4.0`, `v1.0.0`, etc.
 - Controls the version of the compiled Go operator
-- Updated in Helm chart as `appVersion`
+- Updated in Helm chart as `appVersion` at a later point
 
 ### Helm Chart Version (`Chart.yaml` → `version`)
 - Has its own versioning independent of the app
@@ -22,6 +22,7 @@ Versioning is handled independently for the application and the Helm chart to al
 ### `appVersion` (inside Chart.yaml)
 - Tracks the **Go application version**
 - Always matches a real application Git tag (e.g., `v0.4.1`)
+- Only updated together with a new helm release
 
 ---
 
@@ -45,11 +46,11 @@ Otto follows a **Git Flow-inspired model**:
 
 ## Versioning Policy
 
-| Use Case | App Version | Chart Version | Chart `appVersion` | Example Git Tag |
+| Use Case | App Version | Chart Version | Chart `appVersion` | Example Git Tag(s) |
 |----------|-------------|----------------|--------------------|------------------|
-| App only | ✅ bump      | ❌ unchanged    | ✅ bump            | `v0.4.1`         |
-| Chart only | ❌ unchanged | ✅ bump        | ❌ unchanged        | `chart-v0.3.0`   |
-| Both     | ✅ bump      | ✅ bump         | ✅ bump            | `v0.5.0`         |
+| App only | ✅ bump      | ❌ unchanged    | ❌ unchanged             | `v0.4.1`         |
+| Chart only | ❌ unchanged | ✅ bump        | ✅ bump          | `chart-v0.3.0`   |
+| Both     | ✅ bump      | ✅ bump         | ✅ bump            | `v0.5.0,chart-v0.3.1`         |
 
 ---
 
@@ -70,14 +71,14 @@ Otto follows a **Git Flow-inspired model**:
 
 - A bug fix in the app:
   - Tag: `v0.4.1`
-  - `Chart.yaml`: `version: 0.3.0`, `appVersion: v0.4.1`
+  - `Chart.yaml`: `version: 0.3.0`, `appVersion: v0.4.1(done later with a new helm release)`
 
 - A Helm chart change (new values, better templates):
   - Tag: `chart-v0.3.1`
   - `Chart.yaml`: `version: 0.3.1`, `appVersion: v0.4.1` (unchanged app)
 
 - A full new feature (OAuth provider + Helm values):
-  - Tag: `v0.5.0`
+  - Tag(s): `v0.5.0, chart-v0.4.0`
   - `Chart.yaml`: `version: 0.4.0`, `appVersion: v0.5.0`
 
 ---
