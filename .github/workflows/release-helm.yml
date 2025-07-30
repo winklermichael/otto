@@ -69,9 +69,3 @@ jobs:
           charts_dir: dist
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-      
-      - name: Push changes
-        run: |
-          git add dist/chart/Chart.yaml dist/chart/values.yaml
-          git commit -m "Release chart version ${{ github.ref_name }}"
-          git push origin main
