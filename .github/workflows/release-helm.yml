@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'chart-*.*.*'  # Match tags like chart-v1.2.3
 
 jobs:
   release:
@@ -18,6 +20,36 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Change app version in Chart.yaml to latest tag
+        run: |
+          # Get the latest tag with semver format
+          # This assumes tags are in the format vX.Y.Z
+          latest_tag=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          # Extract the version number from the tag
+          version=${latest_tag#v}
+          # Update the Chart.yaml file with the new version
+          sed -i "s/^version: .*/version: $version/" dist/chart/Chart.yaml
+      
+      - name: Change chart version in Chart.yaml to latest tag
+        run: |
+          # Get the latest tag with semver format
+          # This assumes tags are in the format chart-vX.Y.Z
+          latest_tag=$(git tag --sort=-v:refname | grep -E '^chart-[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          # Extract the version number from the tag
+          version=${latest_tag#chart-v}
+          # Update the Chart.yaml file with the new version
+          sed -i "s/^appVersion: .*/appVersion: $version/" dist/chart/Chart.yaml
+
+      - name: Replace image tag in values.yaml with "latest"
+        run: |
+          # Replace the image tag in values.yaml with "latest"
+          sed -i 's/tag: .*/tag: latest/' dist/chart/values.yaml
+
+      - name: Replace image repository in values.yaml with "ghcr.io/winklermichael/otto"
+        run: |
+          # Replace the image repository in values.yaml with "ghcr.io/winklermichael/otto"
+          sed -i 's/repository: .*/repository: ghcr.io\/winklermichael\/otto/' dist/chart/values.yaml
+
       - name: Configure Git
         run: |
           git config user.name "$GITHUB_ACTOR"
@@ -29,3 +61,9 @@ jobs:
           charts_dir: dist
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      
+      - name: Push changes
+        run: |
+          git add dist/chart/Chart.yaml dist/chart/values.yaml
+          git commit -m "Release chart version ${{ github.ref_name }}"
+          git push origin main
