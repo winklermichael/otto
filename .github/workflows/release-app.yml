@@ -46,3 +46,20 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/otto:latest
             ghcr.io/${{ github.repository_owner }}/otto:${{ github.ref_name }}
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          # Extract the relevant section from CHANGELOG.md
+          version="${GITHUB_REF##*/}" # Extract the tag name (e.g., v1.0.5)
+          awk "/## \\[${version}\\]/ {flag=1; next} /## \\[/ {flag=0} flag" CHANGELOG.md > changelog_section.txt
+          echo "changelog_body=$(cat changelog_section.txt)" >> $GITHUB_ENV
+
+      - name: Create GitHub release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          body: ${{ env.changelog_body }}
+          draft: false
+          prerelease: false
